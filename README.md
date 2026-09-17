@@ -31,14 +31,14 @@
  │ server.py (FastAPI :8000)│ ─────────────────────────────┐
  │  auth · PTY hub · files  │                              │
  └──────────────────────────┘                              ▼
-        │                                  ┌──────────────────────────────┐
+        │                                  ┌───────────────────────────────┐
         │ docker exec                      │ ros_client_<user>  (×N, max 3)│
         ▼                                  │ roscore · Gazebo · robot      │
- ┌────────────────────────────┐            └──────────────────────────────┘
+ ┌─────────────────────────────┐           └───────────────────────────────┘
  │ ros_desktop (host container)│
  │ roscore · rosbridge :9091   │
  │ Linux accounts per user     │
- └────────────────────────────┘
+ └─────────────────────────────┘
 ```
 
 See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for details.
@@ -66,23 +66,102 @@ See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for details.
 - Python 3.9+
 - The `ros_noetic_ready:latest` image (ROS Noetic, Gazebo, TurtleBot3, UR5, rosbridge)
 
-## Quick start
+---
+
+## First-time setup
 
 ```bash
-git clone https://github.com/<your-username>/bitgreen-robot-studio.git
+# 1. Clone
+git clone https://github.com/kunjsavani9/bitgreen-robot-studio.git
 cd bitgreen-robot-studio
 
-# 1. Build the ROS image (one time, slow under QEMU)
+# 2. Build the ROS image (one time, slow under QEMU)
 docker build --platform linux/amd64 -t ros_noetic_ready:latest docker/
 
-# 2. Configure
-cp .env.example .env        # set admin username/email + SMTP app password
+# 3. Python environment
+python3 -m venv venv
+source venv/bin/activate
+pip install -r requirements.txt
 
-# 3. Run (creates venv, starts ros_desktop + rosbridge, launches server)
+# 4. Configuration
+cp .env.example .env
+nano .env        # set ROS_ADMIN_USERNAME, ROS_ADMIN_EMAIL, ROS_SMTP_USER, ROS_SMTP_PASS
+```
+
+---
+
+## Starting the dashboard
+
+### Option A — one command
+
+```bash
 ./scripts/start.sh
 ```
 
-Then open:
+This loads `.env`, starts `ros_desktop`, brings up roscore and rosbridge, activates the venv and launches the server.
+
+### Option B — step by step
+
+**1. Start Docker Desktop.** Wait until it reports running, then verify:
+
+```bash
+docker info > /dev/null && echo "Docker OK"
+docker images | grep ros_noetic_ready
+```
+
+**2. Start the shared host container.**
+
+```bash
+# Start the container if it already exists
+docker start ros_desktop
+
+# First run only: create the container instead
+docker run -d --name ros_desktop --platform linux/amd64 \
+  --shm-size 1g -p 9091:9091 \
+  --entrypoint sleep ros_noetic_ready:latest infinity
+```
+
+**3. Launch roscore + rosbridge (port 9091) inside it.**
+
+```bash
+docker exec -d ros_desktop bash -lc \
+  "source /opt/ros/noetic/setup.bash && \
+   (rosnode list >/dev/null 2>&1 || (roscore >/tmp/roscore.log 2>&1 &)) && sleep 5 && \
+   roslaunch rosbridge_server rosbridge_websocket.launch port:=9091 >/tmp/rosbridge.log 2>&1"
+```
+
+**4. Go to the project and activate the venv.**
+
+```bash
+cd ~/ros_workspace/robot_web_ui     # or wherever you cloned the repo
+source venv/bin/activate
+```
+
+**5. Load environment variables (admin + SMTP).**
+
+```bash
+set -a; source .env; set +a
+```
+
+**6. Stop any old instance and start the server.**
+
+```bash
+pkill -f server.py
+python server.py
+```
+
+Expected output:
+
+```
+🚀 ROS Ops Center starting on http://0.0.0.0:8000
+   Login:      http://localhost:8000/login
+   ...
+   Linux users OK (N registered)
+```
+
+> If you see `Linux user reconcile skipped`, `ros_desktop` isn't running. Go back to step 2.
+
+**7. Open in the browser.**
 
 | Page        | URL                           |
 |-------------|-------------------------------|
@@ -91,10 +170,39 @@ Then open:
 | Client view | http://localhost:8000         |
 | Host panel  | http://localhost:8000/host    |
 
-Sign up with the username/email you set as `ROS_ADMIN_*` to get the host role.
-Other devices on the same network should use the machine's LAN IP instead of `localhost`.
+Sign in with the account matching `ROS_ADMIN_USERNAME` / `ROS_ADMIN_EMAIL` to get the host role.
 
-Stop everything with `./scripts/stop.sh` (add `--all` to also stop `ros_desktop`).
+**Other devices on the same network / hotspot:** replace `localhost` with the Mac's IP.
+
+```bash
+ipconfig getifaddr en0      # e.g. 172.20.10.x on an iPhone hotspot
+```
+
+### Stopping
+
+```bash
+./scripts/stop.sh           # stop server + remove client containers
+./scripts/stop.sh --all     # also stop ros_desktop
+```
+
+Manual equivalent:
+
+```bash
+pkill -f server.py
+docker rm -f $(docker ps -aq --filter "name=ros_client_")
+docker stop ros_desktop
+```
+
+### Health checks
+
+```bash
+docker ps                                          # ros_desktop + ros_client_* running?
+docker exec ros_desktop tail -20 /tmp/rosbridge.log
+docker exec ros_desktop du -sh /root/.gazebo       # watch for runaway logs
+./scripts/clean_gazebo_logs.sh                     # if disk is filling up
+```
+
+---
 
 ## Configuration
 
@@ -110,9 +218,9 @@ Tunables such as `MAX_CONTAINERS`, `SPAWN_TIMEOUT` and `SHM_SIZE` live at the to
 ## Development notes
 
 - **HTML changes** need a hard reload (Cmd/Ctrl-Shift-R).
-- **Python changes** need a server restart: re-run `./scripts/start.sh`.
+- **Python changes** need a server restart: `pkill -f server.py && python server.py`.
 - **Stopping rospy scripts** requires `pkill -9`, because rospy ignores SIGTERM.
-- **Disk filling up** usually means runaway Gazebo logs. Run `./scripts/clean_gazebo_logs.sh`.
+- **Browser URL showing `0.0.0.0`:** use `localhost` or the LAN IP instead.
 
 More in [`docs/TROUBLESHOOTING.md`](docs/TROUBLESHOOTING.md).
 
